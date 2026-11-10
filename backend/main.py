@@ -28,7 +28,7 @@ app.add_middleware(
 
 
 
-#parse resume
+#parsing resume
 class Experience(BaseModel):
     company: str | None = None
     role: str | None = None
@@ -53,52 +53,36 @@ resume_schema = Resume.model_json_schema()
 class ChatRequest(BaseModel):
     question: str
 
+
 def ask_candidate(question: str, resume: Resume):
-
     system_prompt = f"""
-You are an AI assistant representing a job candidate.
-
-Below is everything you know about the candidate.
-
-{resume.model_dump_json(indent=2)}
-
-Rules:
-
-1. Answer only using this information.
-
-2. Never hallucinate.
-
-3. If information is unavailable,
-say
-
-"I don't have enough information to answer that."
-
-4. Be professional.
-
-5. Answer as if HR is interviewing this candidate.
-"""
-
+    You are an AI assistant representing a job candidate.
+    Below is everything you know about the candidate.
+    {resume.model_dump_json(indent=2)}
+    Rules:
+    1. Answer only using this information.
+    2. Never hallucinate.
+    3. If information is unavailable,
+    say
+    "I don't have enough information to answer that."
+    4. Be professional.
+    5. Answer as if HR is interviewing this candidate.
+    """
     response = client.chat.completions.create(
-
         model=model,
-
         messages=[
-
             {
                 "role":"system",
                 "content":system_prompt
             },
-
             {
                 "role":"user",
                 "content":question
             }
-
         ]
-
     )
-
     return response.choices[0].message.content
+
 def parse_resume(resume_text):
     system_prompt = f"""
     You are an expert resume parser.
@@ -155,8 +139,9 @@ def parse_resume(resume_text):
     resume = Resume(**data)
     return resume
 
+
 #pdf extraction
-def read_pdf(file_path: Path):
+def read_pdf(file_path: Path): ##path mtlb voh utomatically detect kr lega ki pdf kaunsa hai aur uska text extract kr lega
 
     reader = PdfReader(file_path)
 
@@ -183,7 +168,7 @@ def home():
 
 @app.post("/chat")
 def chat(request: ChatRequest):
-    resume_text=read_pdf(Path("ResumeV2.pdf"))
+    resume_text= Path(__file__).resolve().parent / "resume.pdf"
     resume=parse_resume(resume_text)
     answer=ask_candidate(request.question, resume)
     return {
