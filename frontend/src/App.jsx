@@ -10,9 +10,9 @@ function App() {
   const [theme, setTheme] = useState('dark');
   const [isSidebarOpen, setIsSidebarOpen] = useState(window.innerWidth > 768);
 
-  // Chats structure: { id: string, title: string, messages: [] }
-  const [chats, setChats] = useState([
-    { id: Date.now().toString(), title: "New Chat", messages: [] }
+  // Chats structure:
+  const [chats, setChats] = useState(() => [
+  { id: crypto.randomUUID(), title: "New Chat", messages: [] }
   ]);
   const [currentChatId, setCurrentChatId] = useState(chats[0].id);
   const [isTyping, setIsTyping] = useState(false);
@@ -45,7 +45,11 @@ function App() {
   };
 
   const createNewChat = () => {
-    const newChat = { id: Date.now().toString(), title: "New Chat", messages: [] };
+    const newChat = {
+      id: crypto.randomUUID(),
+      title: "New Chat",
+      messages: []
+    };
     setChats(prev => [newChat, ...prev]);
     setCurrentChatId(newChat.id);
     if (window.innerWidth <= 768) setIsSidebarOpen(false);
@@ -77,8 +81,13 @@ function App() {
     try {
       const response = await fetch(API_URL, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ question })
+        headers: {
+          'Content-Type': 'application/json'
+        },
+        body: JSON.stringify({
+          conversation_id: currentChatId,
+          question: question
+        })
       });
 
       if (!response.ok) {
