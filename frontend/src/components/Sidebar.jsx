@@ -38,7 +38,7 @@ const Sidebar = ({ isOpen, toggleSidebar, chats, currentChatId, createNewChat, s
       </div>
 
       <div className="sidebar-footer">
-        <a href="ResumeV2.pdf" download className="resume-btn" target="_blank" rel="noreferrer">
+        <a href="resume.pdf" download className="resume-btn" target="_blank" rel="noreferrer">
           <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
             <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
             <polyline points="7 10 12 15 17 10"></polyline>
