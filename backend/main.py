@@ -625,7 +625,12 @@ def health():
 def download_resume():
     if not RESUME_PATH.is_file():
         raise HTTPException(status_code=503, detail="Resume temporarily unavailable")
-    return FileResponse(RESUME_PATH, media_type="application/pdf", filename="Keertan-Resume.pdf")
+    return FileResponse(
+        RESUME_PATH,
+        media_type="application/pdf",
+        filename="Keertan-Resume.pdf",
+        headers={"Cache-Control": "no-store"},  # Do not reuse an old downloaded PDF.
+    )
 
 # Both modes share validation, resume loading, and the five-per-minute limit.
 @app.post("/chat", response_model=ChatResponse, responses={

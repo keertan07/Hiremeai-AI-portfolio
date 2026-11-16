@@ -40,7 +40,12 @@ export default function Sidebar({ isOpen, isMobile, toggleSidebar, chats, curren
 
       <div className="sidebar-footer">
         <p className="resume-label">THE FULL PICTURE</p>
-        <a href={resumeUrl} className="resume-btn">
+        <a href={resumeUrl} className="resume-btn" onClick={event => {
+          // A fresh URL also avoids copies cached before the server's no-store fix.
+          const url = new URL(resumeUrl);
+          url.searchParams.set('v', Date.now().toString());
+          event.currentTarget.href = url.href;
+        }}>
           <Icon name="file" />
           <span><strong>Download resume</strong><small>Experience, skills & projects</small></span>
           <Icon name="arrow" size={17} />

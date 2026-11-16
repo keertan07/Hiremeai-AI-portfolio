@@ -133,6 +133,7 @@ class BackendTests(unittest.TestCase):
         response = self.client.get("/resume")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.headers["content-type"], "application/pdf")
+        self.assertEqual(response.headers["cache-control"], "no-store")
         self.assertIn("Keertan-Resume.pdf", response.headers["content-disposition"])
         self.assertEqual(response.content, main.RESUME_PATH.read_bytes())
 
