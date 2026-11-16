@@ -141,6 +141,48 @@ class BackendTests(unittest.TestCase):
             response = self.client.get("/resume")
         self.assertEqual(response.status_code, 503)
 
+    def test_our_vercel_deployments_can_call_chat(self):
+        origins = [
+            'https://hiremeai-ai.vercel.app',
+            'https://hiremeai-ai-portfolio.vercel.app',
+            'https://hiremeai-ai-portfolio-hw8ib2ujs-keertan07s-projects.vercel.app',
+            'https://hiremeai-ai-portfolio-git-main-keertan07s-projects.vercel.app',
+        ]
+        for origin in origins:
+            with self.subTest(origin=origin):
+                response = self.client.options('/chat', headers={
+                    'Origin': origin, 'Access-Control-Request-Method': 'POST',
+                    'Access-Control-Request-Headers': 'content-type',
+                })
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.headers['access-control-allow-origin'], origin)
+
+    def test_other_sites_do_not_get_cors_permission(self):
+        origins = [
+            'https://unrelated.example',
+            'https://other-project-hw8ib2ujs-keertan07s-projects.vercel.app',
+            'https://hiremeai-ai-portfolio-hw8ib2ujs-other-team.vercel.app',
+            'https://hiremeai-ai-portfolio-hw8ib2ujs-keertan07s-projects.vercel.app.evil.example',
+        ]
+        for origin in origins:
+            with self.subTest(origin=origin):
+                response = self.client.options('/chat', headers={
+                    'Origin': origin, 'Access-Control-Request-Method': 'POST',
+                })
+                self.assertEqual(response.status_code, 400)
+                self.assertNotIn('access-control-allow-origin', response.headers)
+
+    def test_chat_response_is_readable_from_our_vercel_preview(self):
+        origin = 'https://hiremeai-ai-portfolio-hw8ib2ujs-keertan07s-projects.vercel.app'
+        stream = FakeStream([stream_chunk('Python'), stream_chunk(finish_reason='stop')])
+        with patch.object(main, 'get_cached_resume', return_value=main.Resume(name='Candidate')), \
+                patch.object(main.client.chat.completions, 'create', return_value=stream):
+            response = self.client.post('/chat', json={**self.payload, 'stream': True},
+                                        headers={'Origin': origin})
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.headers['access-control-allow-origin'], origin)
+        self.assertIn('"type": "done"', response.text)
+
     def test_stream_yields_before_completion_and_saves_only_when_finished(self):
         payload = main.ChatRequest(**self.payload, stream=True)
         history = main.get_conversation_history(payload.conversation_id)

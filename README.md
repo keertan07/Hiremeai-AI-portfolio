@@ -70,6 +70,9 @@ setting is missing. After changing a Vercel environment variable, redeploy the f
 For this project, set Vercel's `VITE_API_URL` to
 `https://hiremeai-ai-portfolio.onrender.com/chat`. Chat uses POST `/chat`;
 POST to the backend home page returns "Method Not Allowed".
+The backend allows this project's public and preview Vercel addresses. If you
+rename the Vercel project/team, update its allowed origins in `backend/main.py`
+and redeploy the backend on Render too.
 
 ### Backend checks
 

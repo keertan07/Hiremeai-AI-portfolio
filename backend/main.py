@@ -107,8 +107,11 @@ app.add_middleware(
     allow_origins=[
         "http://localhost:5173",
         "http://127.0.0.1:5173",
-        "https://hiremeai-ai.vercel.app"
+        "https://hiremeai-ai.vercel.app",
+        "https://hiremeai-ai-portfolio.vercel.app",
     ],
+    # Vercel creates a new URL on each deployment. Allow only this project/team.
+    allow_origin_regex=r"https://hiremeai-ai-portfolio(?:-[a-z0-9-]+)?-keertan07s-projects\.vercel\.app",
     allow_credentials=False,
     allow_methods=["GET", "POST"],
     allow_headers=["Content-Type"],
