@@ -61,11 +61,15 @@ In another PowerShell terminal, from the project root:
 ```powershell
 cd frontend
 npm ci
-$env:VITE_API_URL = 'http://127.0.0.1:8000/chat'
 npm run dev
 ```
 
-Open http://localhost:5173. The API URL override applies to this terminal session.
+Open http://localhost:5173. Development uses the backend at http://127.0.0.1:8000.
+Deployed builds use `VITE_API_URL`, or the project's Render backend when that
+setting is missing. After changing a Vercel environment variable, redeploy the frontend.
+For this project, set Vercel's `VITE_API_URL` to
+`https://hiremeai-ai-portfolio.onrender.com/chat`. Chat uses POST `/chat`;
+POST to the backend home page returns "Method Not Allowed".
 
 ### Backend checks
 

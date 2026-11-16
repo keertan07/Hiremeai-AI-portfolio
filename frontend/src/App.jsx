@@ -1,11 +1,12 @@
 import { useState, useEffect, useRef } from 'react';
 import { readChatStream } from './lib/chatStream';
+import { getApiUrl } from './lib/api';
 import Sidebar from './components/Sidebar';
 import ChatArea from './components/ChatArea';
 import './index.css';
 
-// Set VITE_API_URL for deployment. Both chat and downloads use this backend.
-const API_URL = import.meta.env.VITE_API_URL || 'http://127.0.0.1:8000/chat';
+// A deployed page must never fall back to the visitor's localhost.
+const API_URL = getApiUrl(import.meta.env.DEV, import.meta.env.VITE_API_URL);
 const RESUME_URL = new URL('resume', new URL(API_URL, window.location.origin)).href;
 
 function App() {
