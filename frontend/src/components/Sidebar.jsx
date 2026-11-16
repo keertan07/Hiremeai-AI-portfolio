@@ -1,54 +1,52 @@
-import React from 'react';
+import { useEffect, useRef } from 'react';
+import Icon from './Icon';
 
-const Sidebar = ({ isOpen, toggleSidebar, chats, currentChatId, createNewChat, selectChat, disabled }) => {
+// Navigation and downloads stay separate from the chat request code.
+export default function Sidebar({ isOpen, isMobile, toggleSidebar, chats, currentChatId,
+  createNewChat, selectChat, disabled, resumeUrl }) {
+  const closeButton = useRef(null);
+
+  // Move keyboard focus into the menu when it opens on a phone.
+  useEffect(() => {
+    if (isOpen && isMobile) closeButton.current?.focus();
+  }, [isOpen, isMobile]);
+
   return (
-    <aside className={`sidebar ${isOpen ? 'open' : ''}`}>
-      <div className="sidebar-header">
-        <button className="new-chat-btn" onClick={createNewChat} disabled={disabled}>
-          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="12" y1="5" x2="12" y2="19"></line>
-            <line x1="5" y1="12" x2="19" y2="12"></line>
-          </svg>
-          New chat
-        </button>
-        {/* Close button for mobile */}
-        <button className="close-sidebar-btn" onClick={toggleSidebar}>
-          <svg viewBox="0 0 24 24" width="20" height="20" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
-            <line x1="18" y1="6" x2="6" y2="18"></line>
-            <line x1="6" y1="6" x2="18" y2="18"></line>
-          </svg>
+    <aside id="sidebar" className={`sidebar ${isOpen ? 'open' : ''}`} aria-label="Chat navigation">
+      <div className="sidebar-brand">
+        <span className="brand-mark" aria-hidden="true">K<span>.</span></span>
+        <div><strong>Keertan</strong><span className="brand-caption">AI PORTFOLIO</span></div>
+        <button ref={closeButton} className="icon-button close-sidebar-btn" onClick={toggleSidebar} aria-label="Close menu">
+          <Icon name="close" />
         </button>
       </div>
 
-      <div className="chat-history">
-        <h3 className="history-label">Previous 30 Days</h3>
+      <button className="new-chat-btn" onClick={createNewChat} disabled={disabled}>
+        <Icon name="plus" size={18} /> New conversation
+      </button>
+
+      <nav className="chat-history" aria-label="Conversations">
+        <p className="history-label">YOUR CONVERSATIONS</p>
         {chats.map(chat => (
-          <button
-            key={chat.id}
-            className={`history-btn ${chat.id === currentChatId ? 'active' : ''}`}
-            onClick={() => selectChat(chat.id)}
-            disabled={disabled}
-          >
-            <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
-              <path d="M21 15a2 2 0 0 1-2 2H7l-4 4V5a2 2 0 0 1 2-2h14a2 2 0 0 1 2 2z"></path>
-            </svg>
+          <button key={chat.id} className={`history-btn ${chat.id === currentChatId ? 'active' : ''}`}
+            onClick={() => selectChat(chat.id)} disabled={disabled}
+            aria-current={chat.id === currentChatId ? 'page' : undefined} title={chat.title}>
+            <Icon name="chat" size={17} />
             <span className="history-title">{chat.title}</span>
           </button>
         ))}
-      </div>
+        <p className="history-note">Chats clear when you refresh.</p>
+      </nav>
 
       <div className="sidebar-footer">
-        <a href="resume.pdf" download className="resume-btn" target="_blank" rel="noreferrer">
-          <svg viewBox="0 0 24 24" width="16" height="16" stroke="currentColor" strokeWidth="2" fill="none" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path>
-            <polyline points="7 10 12 15 17 10"></polyline>
-            <line x1="12" y1="15" x2="12" y2="3"></line>
-          </svg>
-          Download Resume
+        <p className="resume-label">THE FULL PICTURE</p>
+        <a href={resumeUrl} className="resume-btn">
+          <Icon name="file" />
+          <span><strong>Download resume</strong><small>Experience, skills & projects</small></span>
+          <Icon name="arrow" size={17} />
         </a>
+        <p className="sidebar-note">A resume. A conversation.<br />A better introduction.</p>
       </div>
     </aside>
   );
-};
-
-export default Sidebar;
+}

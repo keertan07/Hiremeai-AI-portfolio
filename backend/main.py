@@ -1,78 +1,107 @@
-import json
-import os
-from pathlib import Path
-
-## basic imports
-from dotenv import load_dotenv
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from groq import Groq
-from pydantic import BaseModel , constr ## for constraining the length of the question
-from pypdf import PdfReader
-
-## for limiting request body size
-from starlette.middleware.body_limit import RequestBodyLimitMiddleware
-
-##for rate limiting
-from fastapi import Request
-from slowapi import Limiter, _rate_limit_exceeded_handler
-from slowapi.util import get_remote_address
-from slowapi.errors import RateLimitExceeded
-
-## for caching
-from pathlib import Path
-from threading import Lock
-
-## for error handling of various exceptions that may occur during the process of reading and parsing the resume, as well as interacting with the Groq API
+# Flow: check question -> load resume -> read history -> answer -> save turn.
+# Python tools for text, logs, files, time, and shared memory.
 import json
 import logging
-from fastapi import HTTPException, Request
-from pydantic import ValidationError
+import os
+from collections import OrderedDict  # Track recent chats.
+from contextlib import asynccontextmanager  # Server cleanup.
+from hashlib import sha256  # Check file changes.
+from pathlib import Path  # Build file paths independently of the terminal folder.
+from threading import Lock  # Guard shared memory.
+from time import monotonic  # Measure time passed.
+from uuid import UUID  # Check chat IDs.
+
+# Packages for reading files, checking data, serving the API, and calling Groq.
+from docx import Document  # Read Word paragraphs and tables.
+from dotenv import load_dotenv  # Load local secrets without hardcoding credentials.
+from fastapi import FastAPI, HTTPException, Request  # App, HTTP errors, request metadata.
+from fastapi.middleware.cors import CORSMiddleware  # Browser cross-origin permissions.
+from fastapi.responses import FileResponse, StreamingResponse  # Download files or send answer pieces.
+from starlette.concurrency import iterate_in_threadpool  # Keep blocking SDK reads off the event loop.
+from groq import Groq  # SDK client for the hosted language model.
+
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, ValidationError, constr, model_validator
+from pypdf import PdfReader  # Extract selectable text from PDF pages; does not do OCR.
+from pypdf.errors import PdfReadError  # Identify malformed PDF errors.
+
+from starlette.middleware.body_limit import RequestBodyLimitMiddleware
+
+from slowapi import Limiter, _rate_limit_exceeded_handler
+from slowapi.util import get_remote_address  # Read client IP.
+from slowapi.errors import RateLimitExceeded
+
 from groq import (
     APITimeoutError,
     APIConnectionError,
     APIStatusError,
     RateLimitError
 )
+
+# Log technical errors on the server; show short messages to visitors.
 logger = logging.getLogger(__name__)
 
-##resume schema validation
-from pydantic import Field, EmailStr, model_validator
-
-### for ordered dict to maintain the order of the fields in the resume schema
-from collections import OrderedDict
-from time import monotonic
-from uuid import UUID
-
-##for custom exceptions handling below
+# A problem reading the resume file.
 class ResumeExtractionError(Exception):
     pass
+
+# The AI did not return usable JSON.
 class ResumeParsingError(Exception):
     pass
+
+# The JSON does not match our resume fields.
 class ResumeValidationError(Exception):
     pass
 
+# The AI answer is empty or unfinished.
+class ChatResponseError(Exception):
+    pass
 
-load_dotenv()
+# Use this file's folder, no matter where the server command is run.
+BACKEND_DIR = Path(__file__).resolve().parent
 
+load_dotenv(BACKEND_DIR / ".env")
+
+# Read the key from the environment; stop startup if it is missing.
+api_key = os.getenv("GROQ_API_KEY", "").strip()
+if not api_key:
+    raise RuntimeError("Set GROQ_API_KEY in backend/.env or the server environment")
+
+# Reuse one client. Retrying can make the total wait longer than 30 seconds.
 client = Groq(
-    api_key=os.getenv("GROQ_API_KEY")
+    api_key=api_key,
+    timeout=30.0,
+    max_retries=1,
 )
 
-model = "openai/gpt-oss-120b"
-app=FastAPI()
+# Tokens are pieces of text. Parsing a whole resume needs a bigger limit.
+model = os.getenv("GROQ_MODEL", "openai/gpt-oss-120b")
 
-##for rate limiting
+CHAT_MAX_TOKENS = 2048
+RESUME_MAX_TOKENS = 8192
+
+@asynccontextmanager
+# Serve requests at yield, then close the client when the server stops.
+async def lifespan(app: FastAPI):
+    try:
+        yield
+    finally:
+        client.close()
+
+# Uvicorn runs this app; it holds our routes and settings.
+app = FastAPI(lifespan=lifespan)
+
+# Count requests by IP. Counts reset on restart and are not shared by workers.
 limiter = Limiter(key_func=get_remote_address)
 app.state.limiter = limiter
 app.add_exception_handler(RateLimitExceeded, _rate_limit_exceeded_handler)
 
+# Reject large request bodies before processing them (4 KiB maximum).
 app.add_middleware(
     RequestBodyLimitMiddleware,
     max_body_size=4096
 )
 
-## chnages made in cors middleware to allow only specific origins for security reasons
+# Allow these browser origins. This is not a login or API access restriction.
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
@@ -85,49 +114,90 @@ app.add_middleware(
     allow_headers=["Content-Type"],
 )
 
-
-
-#parsing resume
+# One job or internship. Reject unknown fields; missing values may be None.
 class Experience(BaseModel):
-    company: str | None = None
-    role: str | None = None
-    duration: str | None = None
-    description: str | None = None
-    skills_used: list[str] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid")
 
+    company: constr(strip_whitespace=True, min_length=1, max_length=150) | None = None
+    role: constr(strip_whitespace=True, min_length=1, max_length=150) | None = None
+    duration: constr(strip_whitespace=True, min_length=1, max_length=100) | None = None
+    description: constr(strip_whitespace=True, min_length=1, max_length=3000) | None = None
+
+    skills_used: list[
+        constr(strip_whitespace=True, min_length=1, max_length=60)
+    ] = Field(default_factory=list, max_length=30)
+
+# Resume facts: limits check the data shape, not whether facts are true.
+# constr trims/limits text; Field sets limits; default_factory makes a fresh list.
 class Resume(BaseModel):
-    name: str | None = None
-    email: EmailStr | None = None
-    phone: str | None = None
-    total_experience_years: float | None = Field(default=None, ge=0)
-    skills: list[str] = Field(default_factory=list)
-    experiences: list[Experience] = Field(default_factory=list)
-    education: list[str] = Field(default_factory=list)
-    projects: list[str] = Field(default_factory=list)
-    certifications: list[str] = Field(default_factory=list)
+    model_config = ConfigDict(extra="forbid")
 
+    name: constr(strip_whitespace=True, min_length=1, max_length=120) | None = None
+    email: EmailStr | None = None
+    phone: constr(strip_whitespace=True, min_length=1, max_length=30) | None = None
+
+    total_experience_years: float | None = Field(
+        default=None,
+        ge=0,
+        le=60
+    )
+
+    skills: list[
+        constr(strip_whitespace=True, min_length=1, max_length=60)
+    ] = Field(default_factory=list, max_length=60)
+
+    experiences: list[Experience] = Field(
+        default_factory=list,
+        max_length=30
+    )
+
+    education: list[
+        constr(strip_whitespace=True, min_length=1, max_length=500)
+    ] = Field(default_factory=list, max_length=20)
+
+    projects: list[
+        constr(strip_whitespace=True, min_length=1, max_length=1000)
+    ] = Field(default_factory=list, max_length=50)
+
+    certifications: list[
+        constr(strip_whitespace=True, min_length=1, max_length=200)
+    ] = Field(default_factory=list, max_length=30)
+
+    # Reject an empty result after checking individual fields; zero years is valid.
     @model_validator(mode="after")
     def validate_resume(self):
         if not any([
-            self.name, self.email, self.phone,
+            self.name,
+            self.email,
+            self.phone,
             self.total_experience_years is not None,
-            self.skills, self.experiences,
-            self.education, self.projects, self.certifications
+            self.skills,
+            self.experiences,
+            self.education,
+            self.projects,
+            self.certifications
         ]):
             raise ValueError("Empty resume data")
+
         return self
 
-
+# Describe our expected fields for the parser prompt.
 resume_schema = Resume.model_json_schema()
 
-
+# Incoming JSON. Invalid UUIDs/questions return 422. The ID is not a login.
 class ChatRequest(BaseModel):
     conversation_id: UUID
     question: constr(strip_whitespace=True, min_length=1, max_length=500)
+    stream: bool = False  # Opt in to streaming; existing JSON callers still work.
 
+# Outgoing JSON: the chat ID and a nonempty answer.
+class ChatResponse(BaseModel):
+    conversation_id: UUID
+    answer: constr(strip_whitespace=True, min_length=1)
 
-
-def ask_candidate(question: str,resume: Resume,history: list[dict] | None = None):
+# Resume rules first, then old turns, then the question.
+# These rules guide the AI but cannot guarantee perfect facts.
+def build_candidate_messages(question: str, resume: Resume, history: list[dict] | None = None):
     system_prompt = f"""
     You are an AI assistant representing a job candidate.
     Below is everything you know about the candidate.
@@ -144,6 +214,7 @@ def ask_candidate(question: str,resume: Resume,history: list[dict] | None = None
     6. Use conversation history to understand follow-up questions.
     7. Conversation history is context, not a source of new
        candidate facts. Verify factual answers against the resume.
+    8. Use plain text and short paragraphs. Avoid Markdown formatting.
     """
 
     messages = [
@@ -152,18 +223,102 @@ def ask_candidate(question: str,resume: Resume,history: list[dict] | None = None
             "content": system_prompt
         }
     ]
-    # Add previous conversation messages
+
     if history:
         messages.extend(history)
-    # Add current question
+
     messages.append({
         "role": "user",
         "content": question
     })
-    response = client.chat.completions.create(model=model, messages=messages)
-    return response.choices[0].message.content
+    return messages
 
+# Wait for a full JSON answer and check that it finished normally.
+def ask_candidate(question: str, resume: Resume, history: list[dict] | None = None):
+    messages = build_candidate_messages(question, resume, history)
 
+    response = client.chat.completions.create(
+        model=model, messages=messages, max_completion_tokens=CHAT_MAX_TOKENS
+    )
+
+    if not response.choices:
+        raise ChatResponseError("Groq returned no response choices")
+
+    if response.choices[0].finish_reason != "stop":
+        raise ChatResponseError("Groq did not finish the answer normally")
+
+    answer = response.choices[0].message.content
+
+    if not isinstance(answer, str) or not answer.strip():
+        raise ChatResponseError("Groq returned an empty or invalid answer")
+
+    return answer.strip()
+
+# Send text pieces as the AI writes. Save history only after completion.
+def stream_candidate(payload: ChatRequest, resume: Resume, history: list[dict]):
+    # JSON protects text newlines; a blank line marks the end of each event.
+    def event(data):
+        return f"data: {json.dumps(data)}\n\n"
+
+    try:
+        parts = []
+        finish_reason = None
+
+        # Close the provider connection when finished, stopped, or failed.
+        with client.chat.completions.create(
+            model=model,
+            messages=build_candidate_messages(payload.question, resume, history),
+            max_completion_tokens=CHAT_MAX_TOKENS,
+            stream=True,
+        ) as provider_stream:
+            for chunk in provider_stream:
+                if not chunk.choices:  # Usage/metadata chunks may contain no text.
+                    continue
+                choice = chunk.choices[0]
+                text = choice.delta.content
+                if text:
+                    parts.append(text)
+                    yield event({"type": "delta", "text": text})
+                if choice.finish_reason is not None:
+                    finish_reason = choice.finish_reason
+
+        # A closed connection alone does not prove the answer is complete.
+        answer = "".join(parts).strip()
+
+        if finish_reason != "stop" or not answer:
+            raise ChatResponseError("Answer stream was empty or incomplete")
+
+        response = ChatResponse(conversation_id=payload.conversation_id, answer=answer)
+        save_conversation_turn(payload.conversation_id, payload.question, response.answer)
+        yield event({"type": "done", **response.model_dump(mode="json")})
+
+    # Headers were sent already, so send streaming errors inside an event.
+    except (APITimeoutError, APIConnectionError, APIStatusError, ChatResponseError) as exc:
+        if isinstance(exc, APITimeoutError):
+            detail = "AI service timed out. Please try again."
+        elif isinstance(exc, RateLimitError):
+            detail = "AI service is busy. Please try later."
+        elif isinstance(exc, ChatResponseError):
+            detail = "The answer was interrupted or incomplete. Please try again."
+        else:
+            detail = "AI service temporarily unavailable. Please try again."
+        logger.warning("Chat stream failed: %s", type(exc).__name__)
+        yield event({"type": "error", "detail": detail})
+    except Exception:
+        logger.exception("Unexpected chat stream failure")
+        yield event({"type": "error", "detail": "Unable to finish the answer. Please try again."})
+
+# Read blocking SDK results in a worker thread; close them on disconnect.
+# A read already in progress may wait until the network timeout.
+async def stream_events(payload: ChatRequest, resume: Resume, history: list[dict]):
+    events = stream_candidate(payload, resume, history)
+    try:
+        async for event in iterate_in_threadpool(events):
+            yield event
+    finally:
+        events.close()
+
+# Convert document text to JSON, then check it with the Resume model.
 def parse_resume(resume_text):
     system_prompt = f"""
     You are an expert resume parser.
@@ -218,17 +373,25 @@ def parse_resume(resume_text):
     response = client.chat.completions.create(
         model=model,
         messages=messages,
+        max_completion_tokens=RESUME_MAX_TOKENS,
         response_format={"type": "json_object"}
     )
+
+    if not response.choices:
+        raise ResumeParsingError("LLM returned no response choices")
+
+    if response.choices[0].finish_reason == "length":
+        raise ResumeParsingError("LLM resume response exceeded the token limit")
 
     raw_output = response.choices[0].message.content
 
     try:
+        # Check JSON syntax before checking field values.
         data = json.loads(raw_output)
     except (json.JSONDecodeError, TypeError) as exc:
         raise ResumeParsingError(
             "LLM returned invalid JSON"
-        ) from exc
+        ) from exc  # Preserve the original error as the cause for server debugging.
 
     if not isinstance(data, dict):
         raise ResumeParsingError(
@@ -236,7 +399,7 @@ def parse_resume(resume_text):
         )
 
     try:
-        resume = Resume(**data)
+        resume = Resume(**data)  # ** expands dictionary keys into model field values.
     except ValidationError as exc:
         raise ResumeValidationError(
             "Invalid resume schema"
@@ -244,17 +407,11 @@ def parse_resume(resume_text):
 
     return resume
 
-
-
-
-## functions to read pdf and docx files
-from docx import Document
-from pypdf.errors import PdfReadError
-
-MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MB
+# Limit document size and page count before sending text to the AI.
+MAX_FILE_SIZE = 5 * 1024 * 1024  # 5 MiB (commonly called 5 MB).
 MAX_PDF_PAGES = 10
 
-
+# Read selectable page text. Scanned images need OCR, which is not included.
 def read_pdf(file_path: Path):
     if file_path.stat().st_size > MAX_FILE_SIZE:
         raise ValueError("PDF exceeds 5 MB limit")
@@ -280,7 +437,7 @@ def read_pdf(file_path: Path):
 
     return text
 
-
+# Read Word paragraphs and tables; images and text boxes are not read.
 def read_docx(file_path: Path):
     if file_path.stat().st_size > MAX_FILE_SIZE:
         raise ValueError("DOCX exceeds 5 MB limit")
@@ -306,7 +463,7 @@ def read_docx(file_path: Path):
 
     return text
 
-
+# Choose a local-file reader by extension. This is not an upload API.
 def extract_resume_text(file_path: Path):
     extension = file_path.suffix.lower()
 
@@ -318,23 +475,20 @@ def extract_resume_text(file_path: Path):
 
     raise ValueError("Unsupported resume format")
 
-
-
-
-
-## caching the resume to avoid re-parsing it on every request
-##it will parse resume only if the file has changed (based on modification time and size) if not changed it will return the cached resume
-RESUME_PATH = Path(__file__).resolve().parent / "resume.pdf"
+# Keep one parsed resume in memory; a content hash tells us when to refresh.
+RESUME_PATH = BACKEND_DIR / "resume.pdf"
 _resume_cache = {
     "version": None,
     "data": None
 }
-_resume_lock = Lock()##lock to ensure thread safety when accessing the cache
+_resume_lock = Lock()  # Guard cache updates.
+# Let one thread refresh the cache while other requests wait.
 def get_cached_resume():
     with _resume_lock:
-
         try:
-            stat = RESUME_PATH.stat()
+            with RESUME_PATH.open("rb") as resume_file:
+                # One extra byte lets us detect an oversized file safely.
+                contents = resume_file.read(MAX_FILE_SIZE + 1)
         except FileNotFoundError:
             raise
         except OSError as exc:
@@ -342,11 +496,13 @@ def get_cached_resume():
                 "Could not access resume file"
             ) from exc
 
-        version = (stat.st_mtime_ns, stat.st_size)
+        if len(contents) > MAX_FILE_SIZE:
+            raise ResumeExtractionError("Resume exceeds 5 MB limit")
+
+        # Detect edits even if the file size and date stay the same.
+        version = sha256(contents).hexdigest()
 
         if _resume_cache["version"] != version:
-
-            # Extract text from the resume document
             try:
                 resume_text = extract_resume_text(RESUME_PATH)
 
@@ -358,7 +514,6 @@ def get_cached_resume():
                     "Resume extraction failed"
                 ) from exc
 
-            # Parse and validate extracted resume data
             resume = parse_resume(resume_text)
 
             if not resume:
@@ -366,30 +521,28 @@ def get_cached_resume():
                     "Resume parsing returned empty data"
                 )
 
-            # Update cache only after successful processing
+            # Replace the cache only after extraction and validation succeed.
             _resume_cache["data"] = resume
             _resume_cache["version"] = version
 
         return _resume_cache["data"]
 
-
-# Conversation memory configuration
+# Keep 10 exchanges, expire idle chats after 30 minutes, and store at most 100.
 MAX_HISTORY_MESSAGES = 20  # 10 user-assistant exchanges
 CONVERSATION_TTL = 1800    # 30 minutes
 MAX_CONVERSATIONS = 100
 
+# Recent chats move to the end. Memory resets on restart; use one worker.
 _conversation_store = OrderedDict()
 _conversation_lock = Lock()
 
-
+# Remove idle chats, find/create this chat, and return a copy of its messages.
 def get_conversation_history(conversation_id: UUID):
-
     now = monotonic()
     conversation_id = str(conversation_id)
 
     with _conversation_lock:
-
-        # Remove expired conversations
+        # monotonic measures time passed even when the system clock changes.
         expired = [
             cid for cid, session in _conversation_store.items()
             if now - session["last_access"] > CONVERSATION_TTL
@@ -398,7 +551,6 @@ def get_conversation_history(conversation_id: UUID):
         for cid in expired:
             del _conversation_store[cid]
 
-        # Create a new conversation if it doesn't exist
         if conversation_id not in _conversation_store:
             _conversation_store[conversation_id] = {
                 "messages": [],
@@ -410,21 +562,21 @@ def get_conversation_history(conversation_id: UUID):
 
         _conversation_store.move_to_end(conversation_id)
 
-        # Limit total active conversations
+        # Remove the oldest unused chat when the store is full.
         while len(_conversation_store) > MAX_CONVERSATIONS:
             _conversation_store.popitem(last=False)
 
         return list(session["messages"])
 
-
+# Save a successful question/answer pair and trim older messages.
+# The lock guards memory updates, not the entire AI request.
 def save_conversation_turn(conversation_id: UUID, question: str, answer: str):
-
     conversation_id = str(conversation_id)
 
     with _conversation_lock:
-
         session = _conversation_store.get(conversation_id)
 
+        # The chat may have been removed while its answer was being generated.
         if session is None:
             return
 
@@ -439,39 +591,50 @@ def save_conversation_turn(conversation_id: UUID, question: str, answer: str):
             }
         ])
 
-        # Keep only the latest messages
         session["messages"] = session["messages"][-MAX_HISTORY_MESSAGES:]
 
         session["last_access"] = monotonic()
         _conversation_store.move_to_end(conversation_id)
 
-
-
 @app.get("/")
+# Basic welcome route; /health checks the local resume file.
 def home():
     return {
         "message" : "Ye home page hai"
     }
 
-
-# @app.post("/chat")
-# @limiter.limit("5/minute")
-# def chat(request: Request, payload: ChatRequest):##adding rate limiter
-#     resume = get_cached_resume()
-#     answer = ask_candidate(payload.question, resume)
-#     return {
-#         "answer": answer
-#     }
-
-
-##updated (includes error handling for various exceptions that may occur during the process of reading and parsing the resume, as well as interacting with the Groq API)
-@app.post("/chat")
-@limiter.limit("5/minute")
-def chat(request: Request, payload: ChatRequest):
-
+@app.get("/health")
+# Check file access/size without an AI call. This does not test Groq.
+def health():
     try:
-        # Retrieve cached resume
+        with RESUME_PATH.open("rb") as resume_file:
+            size = os.fstat(resume_file.fileno()).st_size  # Size of the opened file.
+    except OSError:
+        raise HTTPException(status_code=503, detail="Resume temporarily unavailable")
+
+    if size == 0 or size > MAX_FILE_SIZE:
+        raise HTTPException(status_code=503, detail="Resume file is empty or too large")
+
+    return {"status": "ok", "resume_cached": _resume_cache["data"] is not None}
+
+@app.get("/resume", response_class=FileResponse)
+# Download the same file the AI reads, rather than a separate frontend copy.
+def download_resume():
+    if not RESUME_PATH.is_file():
+        raise HTTPException(status_code=503, detail="Resume temporarily unavailable")
+    return FileResponse(RESUME_PATH, media_type="application/pdf", filename="Keertan-Resume.pdf")
+
+# Both modes share validation, resume loading, and the five-per-minute limit.
+@app.post("/chat", response_model=ChatResponse, responses={
+    200: {"content": {"text/event-stream": {}}, "description": "JSON answer or streamed delta/done/error events"}
+})
+@limiter.limit("5/minute")
+# FastAPI runs this blocking function in a worker thread.
+# request supplies the IP; payload is the checked JSON body.
+def chat(request: Request, payload: ChatRequest):
+    try:
         try:
+            # Parse only on the first request or when the file changes.
             resume = get_cached_resume()
 
         except FileNotFoundError:
@@ -484,7 +647,7 @@ def chat(request: Request, payload: ChatRequest):
         except ResumeExtractionError:
             logger.exception("Resume extraction failed")
             raise HTTPException(
-                status_code=500,
+                status_code=503,
                 detail="Resume document could not be processed"
             )
 
@@ -502,29 +665,45 @@ def chat(request: Request, payload: ChatRequest):
                 detail="Unable to process resume data"
             )
 
-        # Retrieve previous conversation history
+        # Load context before choosing a streamed or full JSON answer.
         history = get_conversation_history(payload.conversation_id)
 
-        # Generate response using conversation context
+        # Send pieces as they arrive; ask proxies not to buffer them.
+        if payload.stream:
+            return StreamingResponse(
+                stream_events(payload, resume, history),
+                media_type="text/event-stream",
+                headers={"Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no"},
+            )
+
         answer = ask_candidate(
             payload.question,
             resume,
             history
         )
 
-        # Save current question and response
+        # Check the complete answer before saving it to history.
+        chat_response = ChatResponse(
+            conversation_id=payload.conversation_id,
+            answer=answer
+        )
+
         save_conversation_turn(
             payload.conversation_id,
             payload.question,
-            answer
+            chat_response.answer
         )
 
-        return {
-            "conversation_id": str(payload.conversation_id),
-            "answer": answer
-        }
+        return chat_response
 
-    # Groq API error handling
+    # 502: bad AI reply; 503: unavailable service; 504: AI timeout.
+    except ChatResponseError:
+        logger.error("Groq returned an invalid chat response")
+        raise HTTPException(
+            status_code=502,
+            detail="AI service returned an invalid response. Please try again."
+        )
+
     except APITimeoutError:
         logger.warning("Groq API timeout")
         raise HTTPException(
@@ -552,5 +731,3 @@ def chat(request: Request, payload: ChatRequest):
             status_code=502,
             detail="AI service temporarily unavailable"
         )
-
-

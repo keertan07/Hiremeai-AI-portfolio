@@ -32,6 +32,57 @@ To run this project on your local machine, you will need to start both the FastA
 ### 1. Backend Setup (FastAPI)
 The backend acts as the bridge to the Groq API and handles parsing the resume context.
 
-1. Navigate to the backend directory:
-   ```bash
-   cd backend
+From the project root, install the locked Python dependencies (Python 3.13+ and uv):
+
+```powershell
+uv sync --locked
+if (-not (Test-Path backend/.env)) { Copy-Item backend/.env.example backend/.env }
+```
+
+If `backend/.env` already exists, keep it. Set `GROQ_API_KEY` in that file.
+`GROQ_MODEL` is optional. Server environment variables take precedence over the file.
+Keep the resume at `backend/resume.pdf`.
+
+Start the backend from the project root:
+
+```powershell
+uv run uvicorn backend.main:app --reload
+```
+
+API documentation: http://127.0.0.1:8000/docs
+Local health check: http://127.0.0.1:8000/health
+The health check verifies that the resume file is readable, nonempty, and within
+the size limit. It does not parse the document or check Groq availability.
+
+### 2. Frontend Setup
+
+In another PowerShell terminal, from the project root:
+
+```powershell
+cd frontend
+npm ci
+$env:VITE_API_URL = 'http://127.0.0.1:8000/chat'
+npm run dev
+```
+
+Open http://localhost:5173. The API URL override applies to this terminal session.
+
+### Backend checks
+
+```powershell
+uv run python -m unittest discover -s tests -v
+```
+
+These checks mock Groq and do not send the resume to an AI provider.
+Conversation history and request limits are stored in memory: use one backend
+worker for this setup. Restarting the server clears conversation history and limits.
+
+### Streaming answers
+
+The frontend requests streamed answers from the existing `/chat` endpoint and
+displays incoming text immediately. Use the square Stop button to cancel a response.
+API callers can send `stream: true` for server-sent events; omitting it keeps the
+existing JSON response. The first request still waits for uncached resume parsing.
+
+Run the browser stream-parser checks with `npm test` from `frontend`.
+See [STREAMING_REPORT.md](STREAMING_REPORT.md) for the protocol, changes, and limits.
